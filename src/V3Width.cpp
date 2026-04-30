@@ -8338,13 +8338,9 @@ class WidthVisitor final : public VNVisitor {
                                            VAttrType::ENUM_NAME),
                                 new AstSFormatF{subargp->fileline(), fallbackFormat, true,
                                                 subargp->cloneTreePure(false)}};
-                            if (fargp) {
-                                fargp->formatAttr(VFormatAttr::COMPLEX);
-                                subargp->replaceWith(newp);
-                            } else {
-                                subargp->replaceWith(new AstSFormatArg{
-                                    subargp->fileline(), VFormatAttr::COMPLEX, newp});
-                            }
+                            subargp->replaceWith(
+                                new AstSFormatArg{subargp->fileline(), VFormatAttr::COMPLEX,
+                                                  newp});
                             VL_DO_DANGLING(pushDeletep(subargp), subargp);
                         }
                     }
@@ -8361,7 +8357,6 @@ class WidthVisitor final : public VNVisitor {
     }
 
     static AstEnumDType* formatEnumDType(AstNodeExpr* subargp) {
-        if (!subargp) return nullptr;
         AstEnumDType* enumDtp = VN_CAST(subargp->dtypep()->skipRefToEnump(), EnumDType);
         if (!enumDtp) {
             if (const AstVarRef* const varrefp = VN_CAST(subargp, VarRef)) {
