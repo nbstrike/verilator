@@ -255,13 +255,6 @@ class WidthVisitor final : public VNVisitor {
         EXTEND_OFF  // No extension
     };
 
-    int widthUnpacked(const AstNodeDType* const dtypep) {
-        if (const AstUnpackArrayDType* const arrDtypep = VN_CAST(dtypep, UnpackArrayDType)) {
-            return arrDtypep->subDTypep()->width() * arrDtypep->arrayUnpackedElements();
-        }
-        return dtypep->width();
-    }
-
     static void packIfUnpacked(AstNodeExpr* const nodep) {
         if (AstUnpackArrayDType* const unpackDTypep = VN_CAST(nodep->dtypep(), UnpackArrayDType)) {
             const int elementsNum = unpackDTypep->arrayUnpackedElements();
@@ -979,7 +972,11 @@ class WidthVisitor final : public VNVisitor {
             }
             const AstNodeDType* const lhsDtypep = nodep->lhsp()->dtypep()->skipRefToEnump();
             if (VN_IS(lhsDtypep, DynArrayDType) || VN_IS(lhsDtypep, QueueDType)
-                || VN_IS(lhsDtypep, UnpackArrayDType)) {
+                || (VN_IS(lhsDtypep, UnpackArrayDType)
+                    && lhsDtypep->isStreamableFixedAggregate())
+                || (VN_IS(lhsDtypep, NodeUOrStructDType)
+                    && !VN_AS(lhsDtypep, NodeUOrStructDType)->packed()
+                    && lhsDtypep->isStreamableFixedAggregate())) {
                 nodep->dtypeSetStream();
             } else if (lhsDtypep->isCompound()) {
                 nodep->v3warn(E_UNSUPPORTED,
@@ -6301,8 +6298,8 @@ class WidthVisitor final : public VNVisitor {
             // Check width of stream and wrap if needed
             if (AstNodeStream* const streamp = VN_CAST(nodep->rhsp(), NodeStream)) {
                 AstNodeDType* const lhsDTypeSkippedRefp = lhsDTypep->skipRefp();
-                const int lwidth = widthUnpacked(lhsDTypeSkippedRefp);
-                const int rwidth = widthUnpacked(streamp->lhsp()->dtypep()->skipRefp());
+                const int lwidth = lhsDTypeSkippedRefp->widthStream();
+                const int rwidth = streamp->lhsp()->dtypep()->skipRefp()->widthStream();
                 if (lwidth != 0 && lwidth < rwidth) {
                     nodep->v3widthWarn(lwidth, rwidth,
                                        "Target fixed size variable ("
@@ -6322,8 +6319,8 @@ class WidthVisitor final : public VNVisitor {
             }
             if (const AstNodeStream* const streamp = VN_CAST(nodep->lhsp(), NodeStream)) {
                 const AstNodeDType* const rhsDTypep = nodep->rhsp()->dtypep()->skipRefp();
-                const int lwidth = widthUnpacked(streamp->lhsp()->dtypep()->skipRefp());
-                const int rwidth = widthUnpacked(rhsDTypep);
+                const int lwidth = streamp->lhsp()->dtypep()->skipRefp()->widthStream();
+                const int rwidth = rhsDTypep->widthStream();
                 if (rwidth != 0 && rwidth < lwidth) {
                     nodep->v3widthWarn(lwidth, rwidth,
                                        "Stream target requires "

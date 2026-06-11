@@ -973,6 +973,106 @@ class ConstVisitor final : public VNVisitor {
         return !numv.isNumber() ? numv : V3Number{nodep, nodep->width(), numv};
     }
 
+    bool needsFixedAggregateLowering(const AstNodeDType* const dtypep) {
+        const AstNodeDType* const skipDtypep = dtypep->skipRefp();
+        if (const AstUnpackArrayDType* const unpackDtypep
+            = VN_CAST(skipDtypep, UnpackArrayDType)) {
+            return needsFixedAggregateLowering(unpackDtypep->subDTypep());
+        } else if (const AstNodeUOrStructDType* const sdtypep
+                   = VN_CAST(skipDtypep, NodeUOrStructDType)) {
+            return !sdtypep->packed();
+        }
+        return skipDtypep->isDouble();
+    }
+
+    bool lowerAsFixedAggregate(const AstNodeDType* const dtypep) {
+        return dtypep->isStreamableFixedAggregate() && needsFixedAggregateLowering(dtypep);
+    }
+
+    AstStructSel* newStructSel(AstNodeExpr* const fromp, const AstMemberDType* const itemp) {
+        AstStructSel* const selp = new AstStructSel{fromp->fileline(), fromp, itemp->name()};
+        selp->dtypeFrom(itemp->dtypep());
+        return selp;
+    }
+
+    void collectFixedAggregateTerms(AstNodeExpr* const fromp, std::vector<AstNodeExpr*>& termps,
+                                    const bool packReal) {
+        const AstNodeDType* const dtypep = fromp->dtypep()->skipRefp();
+        if (const AstUnpackArrayDType* const unpackDtypep = VN_CAST(dtypep, UnpackArrayDType)) {
+            const int left = unpackDtypep->left();
+            const int right = unpackDtypep->right();
+            const int step = left <= right ? 1 : -1;
+            for (int idx = left;; idx += step) {
+                AstArraySel* const selp
+                    = new AstArraySel{fromp->fileline(), fromp->cloneTreePure(false), idx};
+                collectFixedAggregateTerms(selp, termps, packReal);
+                if (idx == right) break;
+            }
+            VL_DO_DANGLING(pushDeletep(fromp), fromp);
+        } else if (const AstNodeUOrStructDType* const sdtypep
+                   = VN_CAST(dtypep, NodeUOrStructDType)) {
+            if (sdtypep->packed()) {
+                termps.push_back(fromp);
+                return;
+            }
+            for (const AstMemberDType* itemp = sdtypep->membersp(); itemp;
+                 itemp = VN_AS(itemp->nextp(), MemberDType)) {
+                collectFixedAggregateTerms(newStructSel(fromp->cloneTreePure(false), itemp),
+                                           termps, packReal);
+            }
+            VL_DO_DANGLING(pushDeletep(fromp), fromp);
+        } else if (packReal && dtypep->isDouble()) {
+            termps.push_back(new AstRealToBits{fromp->fileline(), fromp});
+        } else {
+            termps.push_back(fromp);
+        }
+    }
+
+    AstNodeExpr* packFixedAggregate(AstNodeExpr* const fromp) {
+        std::vector<AstNodeExpr*> termps;
+        collectFixedAggregateTerms(fromp, termps, true);
+        UASSERT(!termps.empty(), "No stream terms");
+        AstNodeExpr* resultp = termps[0];
+        for (size_t i = 1; i < termps.size(); ++i) {
+            resultp = new AstConcat{resultp->fileline(), resultp, termps[i]};
+        }
+        return resultp;
+    }
+
+    void replaceAssignToFixedAggregate(AstNodeAssign* const nodep, AstNodeExpr* const dstp,
+                                       AstNodeExpr* srcp) {
+        const int dstWidth = dstp->dtypep()->widthStream();
+        std::vector<AstNodeExpr*> termps;
+        collectFixedAggregateTerms(dstp, termps, false);
+        int srcWidth = srcp->width();
+        if (srcWidth < dstWidth) {
+            AstExtend* const extendp = new AstExtend{srcp->fileline(), srcp};
+            extendp->dtypeSetLogicSized(dstWidth, VSigning::UNSIGNED);
+            srcp = new AstShiftL{
+                extendp->fileline(), extendp,
+                new AstConst{extendp->fileline(), static_cast<uint32_t>(dstWidth - srcWidth)},
+                dstWidth};
+            srcWidth = dstWidth;
+        }
+        AstNodeAssign* newp = nullptr;
+        int offset = 0;
+        for (AstNodeExpr* const termp : termps) {
+            const int width = termp->dtypep()->widthStream();
+            AstNodeExpr* rhsp = new AstSel{srcp->fileline(), srcp->cloneTreePure(false),
+                                           srcWidth - offset - width, width};
+            if (termp->dtypep()->skipRefp()->isDouble()) {
+                rhsp = new AstBitsToRealD{rhsp->fileline(), rhsp};
+            }
+            AstNodeAssign* const assignp = nodep->cloneType(termp, rhsp);
+            assignp->dtypeFrom(termp);
+            newp = AstNode::addNext(newp, assignp);
+            offset += width;
+        }
+        nodep->addNextHere(newp);
+        VL_DO_DANGLING(pushDeletep(srcp), srcp);
+        VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
+    }
+
     bool operandConst(const AstNode* nodep) { return VN_IS(nodep, Const); }
     bool operandAsvConst(const AstNode* nodep) {
         // BIASV(CONST, BIASV(CONST,...)) -> BIASV( BIASV_CONSTED(a,b), ...)
@@ -2402,7 +2502,9 @@ class ConstVisitor final : public VNVisitor {
             AstNodeExpr* srcp = streamp->lhsp()->unlinkFrBack();
             AstNodeDType* const srcDTypep = srcp->dtypep()->skipRefp();
             const AstNodeDType* const dstDTypep = nodep->lhsp()->dtypep()->skipRefp();
-            if (VN_IS(srcDTypep, QueueDType) || VN_IS(srcDTypep, DynArrayDType)) {
+            if (lowerAsFixedAggregate(srcDTypep)) {
+                srcp = packFixedAggregate(srcp);
+            } else if (VN_IS(srcDTypep, QueueDType) || VN_IS(srcDTypep, DynArrayDType)) {
                 if (VN_IS(dstDTypep, QueueDType) || VN_IS(dstDTypep, DynArrayDType)) {
                     int srcElementBits = 0;
                     if (const AstNodeDType* const elemDtp = srcDTypep->subDTypep()) {
@@ -2429,6 +2531,11 @@ class ConstVisitor final : public VNVisitor {
                 srcp = new AstShiftL{srcp->fileline(), srcp,
                                      new AstConst{srcp->fileline(), offset}, packedBits};
             }
+            if (lowerAsFixedAggregate(dstDTypep)) {
+                VL_DO_DANGLING(pushDeletep(streamp), streamp);
+                replaceAssignToFixedAggregate(nodep, nodep->lhsp()->unlinkFrBack(), srcp);
+                return true;
+            }
             nodep->rhsp(srcp);
             VL_DO_DANGLING(pushDeletep(streamp), streamp);
             // Further reduce, any of the nodes may have more reductions.
@@ -2438,7 +2545,7 @@ class ConstVisitor final : public VNVisitor {
             AstNodeExpr* streamp = nodep->lhsp()->unlinkFrBack();
             AstNodeExpr* const dstp = VN_AS(streamp, StreamL)->lhsp()->unlinkFrBack();
             AstNodeDType* const dstDTypep = dstp->dtypep()->skipRefp();
-            AstNodeExpr* const srcp = nodep->rhsp()->unlinkFrBack();
+            AstNodeExpr* srcp = nodep->rhsp()->unlinkFrBack();
             const AstNodeDType* const srcDTypep = srcp->dtypep()->skipRefp();
             // Handle unpacked/queue/dynarray source -> queue/dynarray dest via
             // CvtArrayToArray (StreamL reverses, so reverse=true)
@@ -2466,6 +2573,7 @@ class ConstVisitor final : public VNVisitor {
                 VL_DO_DANGLING(pushDeletep(streamp), streamp);
                 return true;
             }
+            if (lowerAsFixedAggregate(srcDTypep)) srcp = packFixedAggregate(srcp);
             const int sWidth = srcp->width();
             const int dWidth = dstp->width();
             // Connect the rhs to the stream operator and update its width
@@ -2476,7 +2584,10 @@ class ConstVisitor final : public VNVisitor {
             } else {
                 streamp->dtypeSetLogicUnsized(srcp->width(), srcp->widthMin(), VSigning::UNSIGNED);
             }
-            if (VN_IS(dstDTypep, UnpackArrayDType)) {
+            if (lowerAsFixedAggregate(dstDTypep)) {
+                replaceAssignToFixedAggregate(nodep, dstp, streamp);
+                return true;
+            } else if (VN_IS(dstDTypep, UnpackArrayDType)) {
                 streamp = new AstCvtPackedToArray{nodep->fileline(), streamp, dstDTypep};
             } else {
                 if (dWidth == 0) {
@@ -2497,6 +2608,16 @@ class ConstVisitor final : public VNVisitor {
             AstNodeExpr* const dstp = VN_AS(streamp, StreamR)->lhsp()->unlinkFrBack();
             AstNodeDType* const dstDTypep = dstp->dtypep()->skipRefp();
             AstNodeExpr* srcp = nodep->rhsp()->unlinkFrBack();
+            if (lowerAsFixedAggregate(dstDTypep)) {
+                const int dWidth = dstDTypep->widthStream();
+                const int sWidth = srcp->width();
+                if (sWidth > dWidth) {
+                    srcp = new AstSel{streamp->fileline(), srcp, sWidth - dWidth, dWidth};
+                }
+                VL_DO_DANGLING(pushDeletep(streamp), streamp);
+                replaceAssignToFixedAggregate(nodep, dstp, srcp);
+                return true;
+            }
             // Handle unpacked/queue/dynarray source -> queue/dynarray dest via
             // CvtArrayToArray (StreamR does not reverse, so reverse=false).
             // V3Width may have wrapped the source in CvtArrayToPacked; unwrap it.
@@ -2556,7 +2677,7 @@ class ConstVisitor final : public VNVisitor {
                 } else {
                     // Source narrower than destination: left-justify by shifting left.
                     // The right stream operator packs left-to-right, so remaining
-                    // LSBs are zero-filled (IEEE 1800-2023 11.4.14.2).
+                    // LSBs are zero-filled (IEEE 1800-2023 11.4.14.3).
                     if (!VN_IS(srcp->dtypep()->skipRefp(), QueueDType)) {
                         AstExtend* const extendp = new AstExtend{srcp->fileline(), srcp};
                         extendp->dtypeSetLogicSized(dWidth, VSigning::UNSIGNED);
@@ -2580,6 +2701,18 @@ class ConstVisitor final : public VNVisitor {
             AstNodeExpr* srcp = streamp->lhsp();
             const AstNodeDType* const srcDTypep = srcp->dtypep()->skipRefp();
             AstNodeDType* const dstDTypep = nodep->lhsp()->dtypep()->skipRefp();
+            if (lowerAsFixedAggregate(srcDTypep)) {
+                AstNodeExpr* const packedp = packFixedAggregate(srcp->unlinkFrBack());
+                streamp->lhsp(packedp);
+                streamp->dtypeSetLogicUnsized(packedp->width(), packedp->widthMin(),
+                                              VSigning::UNSIGNED);
+                srcp = packedp;
+            }
+            if (lowerAsFixedAggregate(dstDTypep)) {
+                replaceAssignToFixedAggregate(nodep, nodep->lhsp()->unlinkFrBack(),
+                                              streamp->unlinkFrBack());
+                return true;
+            }
             if ((VN_IS(srcDTypep, QueueDType) || VN_IS(srcDTypep, DynArrayDType)
                  || VN_IS(srcDTypep, UnpackArrayDType))) {
                 if (VN_IS(dstDTypep, QueueDType) || VN_IS(dstDTypep, DynArrayDType)) {
@@ -2621,6 +2754,12 @@ class ConstVisitor final : public VNVisitor {
                     streamp->dtypeFrom(dstDTypep);
                 }
             }
+        } else if (m_doV && lowerAsFixedAggregate(nodep->lhsp()->dtypep())
+                   && nodep->rhsp()->dtypep()->skipRefp()->isIntegralOrPacked()) {
+            // RHS stream simplification can leave a packed assignment to an aggregate.
+            replaceAssignToFixedAggregate(nodep, nodep->lhsp()->unlinkFrBack(),
+                                          nodep->rhsp()->unlinkFrBack());
+            return true;
         } else if (m_doV && replaceAssignMultiSel(nodep)) {
             return true;
         } else if (replaceAssignSFormatF(nodep)) {
