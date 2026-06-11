@@ -1263,8 +1263,7 @@ bool AstNodeDType::isStreamableFixedAggregate() const {
     const AstNodeDType* const dtypep = skipRefp();
     if (const AstUnpackArrayDType* const adtypep = VN_CAST(dtypep, UnpackArrayDType)) {
         return adtypep->subDTypep()->isStreamableFixedAggregate();
-    } else if (const AstNodeUOrStructDType* const sdtypep
-               = VN_CAST(dtypep, NodeUOrStructDType)) {
+    } else if (const AstNodeUOrStructDType* const sdtypep = VN_CAST(dtypep, NodeUOrStructDType)) {
         if (sdtypep->packed()) return true;
         if (!VN_IS(sdtypep, StructDType)) return false;
         for (const AstMemberDType* itemp = sdtypep->membersp(); itemp;
@@ -1280,8 +1279,7 @@ int AstNodeDType::widthStream() const {
     const AstNodeDType* const dtypep = skipRefp();
     if (const AstUnpackArrayDType* const adtypep = VN_CAST(dtypep, UnpackArrayDType)) {
         return adtypep->subDTypep()->widthStream() * adtypep->elementsConst();
-    } else if (const AstNodeUOrStructDType* const sdtypep
-               = VN_CAST(dtypep, NodeUOrStructDType)) {
+    } else if (const AstNodeUOrStructDType* const sdtypep = VN_CAST(dtypep, NodeUOrStructDType)) {
         if (!VN_IS(sdtypep, StructDType) || sdtypep->packed()) return width();
         int width = 0;
         for (const AstMemberDType* itemp = sdtypep->membersp(); itemp;

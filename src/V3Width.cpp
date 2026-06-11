@@ -972,8 +972,7 @@ class WidthVisitor final : public VNVisitor {
             }
             const AstNodeDType* const lhsDtypep = nodep->lhsp()->dtypep()->skipRefToEnump();
             if (VN_IS(lhsDtypep, DynArrayDType) || VN_IS(lhsDtypep, QueueDType)
-                || (VN_IS(lhsDtypep, UnpackArrayDType)
-                    && lhsDtypep->isStreamableFixedAggregate())
+                || (VN_IS(lhsDtypep, UnpackArrayDType) && lhsDtypep->isStreamableFixedAggregate())
                 || (VN_IS(lhsDtypep, NodeUOrStructDType)
                     && !VN_AS(lhsDtypep, NodeUOrStructDType)->packed()
                     && lhsDtypep->isStreamableFixedAggregate())) {
