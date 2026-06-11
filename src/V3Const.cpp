@@ -977,12 +977,12 @@ class ConstVisitor final : public VNVisitor {
         const AstNodeDType* const skipDtypep = dtypep->skipRefp();
         if (const AstUnpackArrayDType* const unpackDtypep
             = VN_CAST(skipDtypep, UnpackArrayDType)) {
-            return needsFixedAggregateLowering(unpackDtypep->subDTypep());
+            return true;
         } else if (const AstNodeUOrStructDType* const sdtypep
                    = VN_CAST(skipDtypep, NodeUOrStructDType)) {
             return !sdtypep->packed();
         }
-        return skipDtypep->isDouble();
+        return false;
     }
 
     bool lowerAsFixedAggregate(const AstNodeDType* const dtypep) {
@@ -2754,12 +2754,6 @@ class ConstVisitor final : public VNVisitor {
                     streamp->dtypeFrom(dstDTypep);
                 }
             }
-        } else if (m_doV && lowerAsFixedAggregate(nodep->lhsp()->dtypep())
-                   && nodep->rhsp()->dtypep()->skipRefp()->isIntegralOrPacked()) {
-            // RHS stream simplification can leave a packed assignment to an aggregate.
-            replaceAssignToFixedAggregate(nodep, nodep->lhsp()->unlinkFrBack(),
-                                          nodep->rhsp()->unlinkFrBack());
-            return true;
         } else if (m_doV && replaceAssignMultiSel(nodep)) {
             return true;
         } else if (replaceAssignSFormatF(nodep)) {
@@ -3643,6 +3637,21 @@ class ConstVisitor final : public VNVisitor {
         nodep->replaceWith(newp);
         VL_DO_DANGLING(pushDeletep(nodep), nodep);
     }
+    bool rhsStreamToFixedAggregate(AstNodeStream* const nodep) {
+        const AstNodeAssign* const assignp = VN_CAST(nodep->backp(), NodeAssign);
+        return assignp && assignp->rhsp() == nodep
+               && lowerAsFixedAggregate(assignp->lhsp()->dtypep());
+    }
+    void visit(AstStreamL* nodep) override {
+        iterateChildren(nodep);
+        if (rhsStreamToFixedAggregate(nodep)) return;
+        visitGen(nodep);
+    }
+    void visit(AstStreamR* nodep) override {
+        iterateChildren(nodep);
+        if (rhsStreamToFixedAggregate(nodep)) return;
+        visitGen(nodep);
+    }
     void visit(AstCvtArrayToArray* nodep) override {
         iterateChildren(nodep);
         // Handle the case where we have a stream operation inside a cast conversion
@@ -4184,6 +4193,8 @@ class ConstVisitor final : public VNVisitor {
     // clang-format off
     TREE_SKIP_VISIT("ArraySel");
     TREE_SKIP_VISIT("CAwait");
+    TREE_SKIP_VISIT("StreamL");
+    TREE_SKIP_VISIT("StreamR");
 
     //-----
     //  "AstNODETYPE {             # bracket not paren
