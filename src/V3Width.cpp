@@ -267,6 +267,9 @@ class WidthVisitor final : public VNVisitor {
                 nodep->findLogicDType(unpackBits, unpackMinBits, VSigning::UNSIGNED)});
         }
     }
+    static bool lowerAsFixedAggregate(const AstNodeDType* const dtypep) {
+        return dtypep->isStreamableFixedAggregate() && dtypep->containsUnpackedStruct();
+    }
     // When fromp() is a DType (e.g. unlinked RefDType), resolve through
     // the ref chain; when it's an expression, dtypep() is already resolved.
     static AstNodeDType* fromDTypep(AstNode* fromp) {
@@ -6291,7 +6294,7 @@ class WidthVisitor final : public VNVisitor {
             userIterateAndNext(nodep->rhsp(), WidthVP{nodep->dtypep(), PRELIM}.p());
             //
             // UINFOTREE(1, nodep, "", "assign");
-            AstNodeDType* const lhsDTypep
+            AstNodeDType* lhsDTypep
                 = nodep->lhsp()->dtypep();  // Note we use rhsp for context determined
 
             // Check width of stream and wrap if needed
@@ -6310,15 +6313,17 @@ class WidthVisitor final : public VNVisitor {
                     const int queueElementSize = streamp->lhsp()->dtypep()->subDTypep()->width();
                     UASSERT_OBJ(queueElementSize <= lwidth, nodep, "LHS < RHS");
                 }
-                if (VN_IS(lhsDTypeSkippedRefp, UnpackArrayDType)) {
+                if (VN_IS(lhsDTypeSkippedRefp, UnpackArrayDType)
+                    || lowerAsFixedAggregate(lhsDTypeSkippedRefp)) {
                     streamp->unlinkFrBack();
                     nodep->rhsp(new AstCvtPackedToArray{streamp->fileline(), streamp,
                                                         lhsDTypeSkippedRefp});
                 }
             }
-            if (const AstNodeStream* const streamp = VN_CAST(nodep->lhsp(), NodeStream)) {
+            if (AstNodeStream* const streamp = VN_CAST(nodep->lhsp(), NodeStream)) {
                 const AstNodeDType* const rhsDTypep = nodep->rhsp()->dtypep()->skipRefp();
-                const int lwidth = streamp->lhsp()->dtypep()->skipRefp()->widthStream();
+                AstNodeDType* const lhsStreamDTypep = streamp->lhsp()->dtypep()->skipRefp();
+                const int lwidth = lhsStreamDTypep->widthStream();
                 const int rwidth = rhsDTypep->widthStream();
                 if (rwidth != 0 && rwidth < lwidth) {
                     nodep->v3widthWarn(lwidth, rwidth,
@@ -6327,7 +6332,27 @@ class WidthVisitor final : public VNVisitor {
                                            << " bits, but source expression only provides "
                                            << rwidth << " bits (IEEE 1800-2023 11.4.14.3)");
                 }
-                if (VN_IS(rhsDTypep, UnpackArrayDType)) {
+                if (lowerAsFixedAggregate(lhsStreamDTypep)) {
+                    AstNodeExpr* const streamExprp = nodep->lhsp()->unlinkFrBack();
+                    AstNodeExpr* const dstp = streamp->lhsp()->unlinkFrBack();
+                    AstNodeExpr* srcp = nodep->rhsp()->unlinkFrBack();
+                    if (VN_IS(streamp, StreamL)) {
+                        streamp->lhsp(srcp);
+                        streamp->dtypeSetLogicUnsized(srcp->width(), srcp->widthMin(),
+                                                      VSigning::UNSIGNED);
+                        srcp = streamExprp;
+                    } else {
+                        if (srcp->width() > lwidth) {
+                            srcp = new AstSel{streamp->fileline(), srcp, srcp->width() - lwidth,
+                                              lwidth};
+                        }
+                        VL_DO_DANGLING(pushDeletep(streamExprp), streamExprp);
+                    }
+                    nodep->lhsp(dstp);
+                    nodep->rhsp(new AstCvtPackedToArray{srcp->fileline(), srcp, lhsStreamDTypep});
+                    nodep->dtypeFrom(dstp);
+                    lhsDTypep = nodep->lhsp()->dtypep();
+                } else if (VN_IS(rhsDTypep, UnpackArrayDType)) {
                     AstNodeExpr* const rhsp = nodep->rhsp()->unlinkFrBack();
                     nodep->rhsp(
                         new AstCvtArrayToPacked{rhsp->fileline(), rhsp, streamp->dtypep()});

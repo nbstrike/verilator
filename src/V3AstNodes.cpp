@@ -1275,6 +1275,15 @@ bool AstNodeDType::isStreamableFixedAggregate() const {
     return dtypep->isIntegralOrPacked() || dtypep->isDouble();
 }
 
+bool AstNodeDType::containsUnpackedStruct() const {
+    const AstNodeDType* const dtypep = skipRefp();
+    if (const AstUnpackArrayDType* const adtypep = VN_CAST(dtypep, UnpackArrayDType)) {
+        return adtypep->subDTypep()->containsUnpackedStruct();
+    }
+    const AstStructDType* const sdtypep = VN_CAST(dtypep, StructDType);
+    return sdtypep && !sdtypep->packed();
+}
+
 int AstNodeDType::widthStream() const {
     const AstNodeDType* const dtypep = skipRefp();
     if (const AstUnpackArrayDType* const adtypep = VN_CAST(dtypep, UnpackArrayDType)) {
