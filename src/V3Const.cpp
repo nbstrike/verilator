@@ -977,22 +977,6 @@ class ConstVisitor final : public VNVisitor {
         return dtypep->isStreamableFixedAggregate() && dtypep->containsUnpackedStruct();
     }
 
-    AstNodeExpr* unwrapPackedCvtFromPacked(AstNodeExpr* const srcp) {
-        AstCvtArrayToPacked* const cvtp = VN_CAST(srcp, CvtArrayToPacked);
-        if (!cvtp) return srcp;
-        const AstNodeDType* const fromDTypep = cvtp->fromp()->dtypep()->skipRefp();
-        if (VN_IS(fromDTypep, UnpackArrayDType) || VN_IS(fromDTypep, QueueDType)
-            || VN_IS(fromDTypep, DynArrayDType)) {
-            return srcp;
-        }
-        VNRelinker relinker;
-        cvtp->unlinkFrBack(&relinker);
-        AstNodeExpr* const fromp = cvtp->fromp()->unlinkFrBack();
-        relinker.relink(fromp);
-        VL_DO_DANGLING(pushDeletep(cvtp), cvtp);
-        return fromp;
-    }
-
     AstStructSel* newStructSel(AstNodeExpr* const fromp, const AstMemberDType* const itemp) {
         AstStructSel* const selp = new AstStructSel{fromp->fileline(), fromp, itemp->name()};
         selp->dtypeFrom(itemp->dtypep());
@@ -1060,17 +1044,19 @@ class ConstVisitor final : public VNVisitor {
         }
         AstNodeAssign* newp = nullptr;
         int offset = 0;
-        for (AstNodeExpr* const termp : termps) {
+        for (size_t i = 0; i < termps.size(); ++i) {
+            AstNodeExpr* const termp = termps[i];
             const int width = termp->dtypep()->widthStream();
-            AstNodeExpr* rhsp = new AstSel{srcp->fileline(), srcp->cloneTreePure(false),
-                                           srcWidth - offset - width, width};
+            const int lsb = srcWidth - offset - width;
+            offset += width;
+            AstNodeExpr* rhsp
+                = new AstSel{srcp->fileline(), srcp->cloneTreePure(false), lsb, width};
             if (termp->dtypep()->skipRefp()->isDouble()) {
                 rhsp = new AstBitsToRealD{rhsp->fileline(), rhsp};
             }
             AstNodeAssign* const assignp = nodep->cloneType(termp, rhsp);
             assignp->dtypeFrom(termp);
             newp = AstNode::addNext(newp, assignp);
-            offset += width;
         }
         nodep->addNextHere(newp);
         VL_DO_DANGLING(pushDeletep(srcp), srcp);
@@ -2505,7 +2491,7 @@ class ConstVisitor final : public VNVisitor {
             if (lowerAsFixedAggregate(srcp->dtypep())) {
                 srcp = packFixedAggregate(srcp);
             } else if (AstNodeStream* const streamp = VN_CAST(srcp, NodeStream)) {
-                AstNodeExpr* const streamSrcp = unwrapPackedCvtFromPacked(streamp->lhsp());
+                AstNodeExpr* const streamSrcp = streamp->lhsp();
                 if (lowerAsFixedAggregate(streamSrcp->dtypep())) {
                     AstNodeExpr* const packedp = packFixedAggregate(streamSrcp->unlinkFrBack());
                     streamp->lhsp(packedp);
@@ -2522,7 +2508,7 @@ class ConstVisitor final : public VNVisitor {
             // change the order of bits. Eliminate stream but keep its lhsp.
             // Add a cast if needed.
             AstStreamR* const streamp = VN_AS(nodep->rhsp(), StreamR)->unlinkFrBack();
-            AstNodeExpr* srcp = unwrapPackedCvtFromPacked(streamp->lhsp())->unlinkFrBack();
+            AstNodeExpr* srcp = streamp->lhsp()->unlinkFrBack();
             AstNodeDType* const srcDTypep = srcp->dtypep()->skipRefp();
             const AstNodeDType* const dstDTypep = nodep->lhsp()->dtypep()->skipRefp();
             if (lowerAsFixedAggregate(srcDTypep)) {
@@ -2716,7 +2702,7 @@ class ConstVisitor final : public VNVisitor {
             return true;
         } else if (m_doV && VN_IS(nodep->rhsp(), StreamL)) {
             AstStreamL* streamp = VN_AS(nodep->rhsp(), StreamL);
-            AstNodeExpr* srcp = unwrapPackedCvtFromPacked(streamp->lhsp());
+            AstNodeExpr* srcp = streamp->lhsp();
             const AstNodeDType* const srcDTypep = srcp->dtypep()->skipRefp();
             AstNodeDType* const dstDTypep = nodep->lhsp()->dtypep()->skipRefp();
             if (lowerAsFixedAggregate(srcDTypep)) {

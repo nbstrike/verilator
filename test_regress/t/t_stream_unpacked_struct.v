@@ -108,6 +108,7 @@ module t;
   packed_union_struct_t packed_union_struct_out;
 
   logic [19:0] simple_bits;
+  logic [31:0] wide_simple_bits;
   logic [31:0] array_bits;
   logic [35:0] nested_bits;
   logic [55:0] struct_array_bits;
@@ -139,6 +140,10 @@ module t;
     simple = '{8'h12, 4'ha, '{4'hb, 4'hc}};
     simple_bits = {>>{simple}};
     `checkh(simple_bits, 20'h12abc);
+    /* verilator lint_off WIDTHEXPAND */
+    wide_simple_bits = {>>{simple}};
+    /* verilator lint_on WIDTHEXPAND */
+    `checkh(wide_simple_bits, 32'h12abc000);
     simple_bits = {<<4{simple}};
     `checkh(simple_bits, 20'hcba21);
 
@@ -165,10 +170,24 @@ module t;
     `checkh(simple_out.b, 4'ha);
     `checkh(simple_out.p, 8'hbc);
 
-    narrow_bits = 12'habd;
+    {>>{simple_out}} = simple;
+    `checkh(simple_out.a, 8'h12);
+    `checkh(simple_out.b, 4'ha);
+    `checkh(simple_out.p, 8'hbc);
+
+    if ($test$plusargs("t_stream_unpacked_struct_alt")) begin
+      narrow_bits = 12'h123;
+    end else begin
+      narrow_bits = 12'habd;
+    end
+    /* verilator lint_off WIDTHEXPAND */
+    simple_bits = {>>{narrow_bits}};
+    /* verilator lint_on WIDTHEXPAND */
+    `checkh(simple_bits, {narrow_bits, 8'h00});
+
     simple_out = {>>{narrow_bits}};
-    `checkh(simple_out.a, 8'hab);
-    `checkh(simple_out.b, 4'hd);
+    `checkh(simple_out.a, narrow_bits[11:4]);
+    `checkh(simple_out.b, narrow_bits[3:0]);
     `checkh(simple_out.p, 8'h00);
 
     {>>{simple_out}} = 24'habcdef;
